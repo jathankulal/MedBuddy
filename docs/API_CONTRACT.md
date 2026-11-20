@@ -1,8 +1,8 @@
 # MedBuddy API Contract
 
-**Version:** 1.1 (draft)  
-**Owner:** Developer 1 (backend) — shared agreement with Developer 2 (frontend/safety)  
-**Branch:** `backend-data`  
+**Version:** 1.2 (draft)
+**Owner:** Developer 1 (backend) — shared agreement with Developer 2 (frontend/safety)
+**Branch:** `backend-data`
 **Scope:** Single-user local-first hackathon prototype. Not a medical device. No diagnosis, no prescriptions.
 
 ---
@@ -64,6 +64,8 @@ All errors return a JSON body with this shape:
 | `error.message` | string | Yes | Human-readable message suitable for UI display |
 | `error.details` | object\|null | No | Optional field-specific validation details |
 
+FastAPI validation errors (422) use this same envelope; `error.code` is `ERR_VALIDATION` and `error.details` contains the field-level validation failures.
+
 ### HTTP Status Codes Used
 
 | Status | When Used |
@@ -71,12 +73,12 @@ All errors return a JSON body with this shape:
 | 200 | Successful GET / PUT |
 | 201 | Successful POST (create) |
 | 204 | Successful DELETE |
-| 400 | Validation error / bad request |
+| 400 | Validation error / bad request (non-Pydantic) |
 | 404 | Resource not found |
-| 409 | Conflict (exact duplicate medication, medication conflict) |
-| 413 | Payload too large (uploaded file exceeds size limit) |
+| 409 | Conflict (exact duplicate medication record) |
+| 413 | Payload too large (uploaded file exceeds 10 MB) |
 | 415 | Unsupported media type (uploaded file is not a PDF) |
-| 422 | Unprocessable entity (Pydantic validation failure) |
+| 422 | Unprocessable entity (Pydantic validation failure, or valid PDF violating document rules such as page count or password protection) |
 | 500 | Internal server error (includes safety engine failure) |
 | 502 | Backend Gemini call failed |
 
@@ -86,12 +88,33 @@ All errors return a JSON body with this shape:
 |------|--------|---------|
 | `ERR_VALIDATION` | 400/422 | Invalid request body or query |
 | `ERR_NOT_FOUND` | 404 | Requested resource does not exist |
-| `ERR_CONFLICT` | 409 | Exact duplicate medication or medication conflict |
-| `ERR_UNSUPPORTED_FILE` | 415 | Uploaded file is not a PDF |
-| `ERR_PAYLOAD_TOO_LARGE` | 413 | Uploaded file exceeds size limit |
+| `ERR_CONFLICT` | 409 | Exact duplicate medication record |
+| `ERR_UNSUPPORTED_FILE` | 415 | Uploaded file is not a PDF (validated by content, not filename/MIME type) |
+| `ERR_PAYLOAD_TOO_LARGE` | 413 | Uploaded file exceeds 10 MB |
 | `ERR_SAFETY_ENGINE` | 500 | Safety engine call failed or returned invalid result |
 | `ERR_GEMINI` | 502 | Backend Gemini call failed |
 | `ERR_INTERNAL` | 500 | Unexpected server error |
+
+#### `error.details` for Medication Conflicts (409)
+
+When `POST /medications` or `PUT /medications/{id}` returns `409 ERR_CONFLICT` for an exact duplicate:
+
+```json
+{
+  "error": {
+    "code": "ERR_CONFLICT",
+    "message": "Exact duplicate medication record detected",
+    "details": {
+      "duplicate_type": "exact",
+      "matched_item": "medication-id",
+      "existing_medication_id": "medication-id-of-duplicate",
+      "warnings": []
+    }
+  }
+}
+```
+
+For ingredient overlap (not a conflict), the medication is saved and structured warnings are returned in the normal `MedicationRead` response alongside a `medication_warnings` field (see Section 4.4).
 
 ---
 
@@ -121,22 +144,22 @@ Single-user prototype: one active health profile.
 
 #### GET /profile
 
-Returns the current health profile, or empty/default if none exists.
+Returns the current health profile.
 
-**Request:** none
+**Behavior when no profile exists:** Returns HTTP 200 with a default empty profile. All optional fields are absent or null; `id` is null. This indicates no profile has been created yet. The frontend should treat this as "no profile" and allow the user to create one via `PUT /profile`.
 
 **Response (200):**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `id` | string | Yes | Profile identifier |
+| `id` | string\|null | Yes | Profile identifier, or null if no profile exists |
 | `full_name` | string | No | User's full name |
 | `date_of_birth` | string (date) | No | ISO-8601 date |
 | `allergies` | list[string] | No | Known allergies |
 | `conditions` | list[string] | No | Existing medical conditions |
 | `emergency_contact` | string | No | Emergency contact name/phone |
-| `created_at` | string (datetime) | Yes | Creation timestamp |
-| `updated_at` | string (datetime) | Yes | Last update timestamp |
+| `created_at` | string (datetime) | No | Creation timestamp, null if no profile |
+| `updated_at` | string (datetime) | No | Last update timestamp, null if no profile |
 
 **Pydantic models:** `ProfileRead` (response), `ProfileCreate` / `ProfileUpdate` (request bodies)
 
@@ -189,7 +212,7 @@ Create a new episode.
 
 Get a single episode by ID.
 
-**Response (200):** `EpisodeRead`  
+**Response (200):** `EpisodeRead`
 **Response (404):** `ERR_NOT_FOUND` if episode does not exist
 
 #### PUT /episodes/{episode_id}
@@ -198,7 +221,7 @@ Update an existing episode.
 
 **Request body:** same fields as POST (all optional for partial update)
 
-**Response (200):** `EpisodeRead`  
+**Response (200):** `EpisodeRead`
 **Response (404):** `ERR_NOT_FOUND`
 
 **Pydantic models:** `EpisodeRead`, `EpisodeCreate`, `EpisodeUpdate`
@@ -219,14 +242,14 @@ Update an existing episode.
 
 ### 4.4 Medication Management
 
-Developer 2 implements safety checks (allergies, duplicates, conflicts) in the `safety/` package and calls them through the backend integration. Developer 1 stores and returns medication data; Developer 1 does **not** implement safety logic.
+Developer 2 implements safety checks (allergies, duplicates, ingredient overlap) in the `safety/` package and calls them through the backend integration. Developer 1 stores and returns medication data; Developer 1 does **not** implement safety logic.
 
 The backend distinguishes three kinds of medication overlap:
 
-| Kind | Meaning | Detection claimed? |
-|------|---------|--------------------|
-| Exact duplicate | Same medication record (same name, dosage, route, strength) | Yes — via `check_medication_entry` |
-| Active ingredient overlap | Different brands/products sharing active ingredient(s) | Yes — via `check_medication_entry` |
+| Kind | Meaning | Backend action |
+|------|---------|----------------|
+| Exact duplicate | Same medication record (same name, dosage, route, strength) as an existing record | Reject with `409 ERR_CONFLICT` |
+| Active ingredient overlap | Different brands/products sharing active ingredient(s) | Save the medication; return structured `medication_warnings` in the response |
 | Actual drug interaction | Pharmacodynamic/pharmacokinetic interaction between medications | **No** — not claimed as comprehensive |
 
 #### GET /medications
@@ -257,29 +280,44 @@ Create a new medication.
 | `notes` | string | No | Max 1000 chars |
 | `status` | string | No | One of: `active`, `discontinued` |
 
-**Response (201):** `MedicationRead`  
-**Response (409):** `ERR_CONFLICT` if exact duplicate or active ingredient overlap detected by safety engine
+**Backend integration:** Before saving, the backend calls `safety.engine.check_medication_entry(candidate_medication, health_profile, existing_medications)`.
+
+- If `is_duplicate` is `true` and `duplicate_type` is `exact`: return `409 ERR_CONFLICT`. Do not save.
+- If `is_duplicate` is `false` but ingredient overlap warnings exist: save the medication and return `201` with `MedicationRead` plus a `medication_warnings` field containing the structured `SafetyWarning` objects.
+- If `duplicate_type` is `none`: save normally with `201`.
+
+**Response (201):** `MedicationRead` (may include `medication_warnings`)
+**Response (409):** `ERR_CONFLICT` for exact duplicate only
 
 #### GET /medications/{medication_id}
 
 Get a single medication by ID.
 
-**Response (200):** `MedicationRead`  
+**Response (200):** `MedicationRead`
 **Response (404):** `ERR_NOT_FOUND`
 
 #### PUT /medications/{medication_id}
 
 Update an existing medication. All fields optional (partial update).
 
-**Response (200):** `MedicationRead`  
-**Response (404):** `ERR_NOT_FOUND`  
-**Response (409):** `ERR_CONFLICT`
+**Backend integration:**
+1. Load the existing medication record.
+2. Merge submitted fields with the existing record to form the complete merged record.
+3. Exclude the current medication from `existing_medications` when calling `check_medication_entry` (so a medication is not flagged as a duplicate of itself).
+4. Call `safety.engine.check_medication_entry(merged_record, health_profile, existing_medications_except_self)`.
+5. Validate date constraints (`end_date >= start_date`) against the complete merged record.
+6. If `is_duplicate` is `true` and `duplicate_type` is `exact`: return `409 ERR_CONFLICT`. Do not save.
+7. Otherwise save the merged record and return `200` with `MedicationRead` plus any `medication_warnings`.
+
+**Response (200):** `MedicationRead` (may include `medication_warnings`)
+**Response (404):** `ERR_NOT_FOUND`
+**Response (409):** `ERR_CONFLICT` for exact duplicate only
 
 #### DELETE /medications/{medication_id}
 
 Delete a medication.
 
-**Response (204):** No content  
+**Response (204):** No content
 **Response (404):** `ERR_NOT_FOUND`
 
 **Pydantic models:** `MedicationRead`, `MedicationCreate`, `MedicationUpdate`
@@ -321,14 +359,16 @@ Upload a PDF file.
 
 **Request:** `multipart/form-data` with field `file`
 
+**Backend validation:** The backend inspects the actual PDF file content (magic bytes / PDF header), not just the filename or supplied MIME type, to confirm it is a valid PDF.
+
 **PDF Upload Restrictions:**
 
-| Rule | Limit |
-|------|-------|
-| Allowed MIME type | `application/pdf` only |
-| Max file size | 10 MB |
-| Max pages | 100 pages |
-| Encrypted/password-protected PDFs | Rejected |
+| Rule | Limit | Status Code |
+|------|-------|-------------|
+| File size | Max 10 MB | 413 `ERR_PAYLOAD_TOO_LARGE` |
+| File type | Valid PDF content (not just `application/pdf` MIME) | 415 `ERR_UNSUPPORTED_FILE` |
+| Page count | Max 100 pages | 422 `ERR_VALIDATION` |
+| Encrypted/password-protected PDFs | Rejected | 422 `ERR_VALIDATION` |
 
 **Response (201):**
 
@@ -343,9 +383,12 @@ Upload a PDF file.
 | `uploaded_at` | string (datetime) | Upload timestamp |
 | `status` | string | `uploaded` \| `indexed` \| `failed` |
 
-**Response (400):** `ERR_VALIDATION` for invalid form fields  
-**Response (413):** `ERR_PAYLOAD_TOO_LARGE` if file exceeds size limit  
-**Response (415):** `ERR_UNSUPPORTED_FILE` if not a PDF or exceeds page limit
+**Response (400):** `ERR_VALIDATION` for invalid form fields
+**Response (413):** `ERR_PAYLOAD_TOO_LARGE` if file exceeds 10 MB
+**Response (415):** `ERR_UNSUPPORTED_FILE` if file is not a valid PDF
+**Response (422):** `ERR_VALIDATION` if a valid PDF violates document rules (excessive page count, password protection)
+
+**Upload succeeds but extraction/indexing fails:** The document record is created with `status: "failed"`, `chunk_count: 0`, and the PDF binary is retained locally. The frontend can show the document as failed and offer retry or delete. Extraction/indexing failure does not return an error to the upload request; it is reflected in the document's `status` field.
 
 **Pydantic models:** `DocumentRead`, `DocumentUploadResponse`
 
@@ -360,7 +403,7 @@ The user sends a message. The backend:
 1. Loads health profile, medications, and episodes from JSON persistence.
 2. Calls Developer 2's safety engine (`assess_safety`) **before** any Gemini generation.
 3. If `safety.emergency` is `true`: returns an emergency safety response, does **not** call Gemini, `response_mode` = `"emergency"`.
-4. If the safety engine fails or returns an invalid result: returns `ERR_SAFETY_ENGINE`, does **not** call Gemini.
+4. If the safety engine fails or returns an invalid result: returns `ERR_SAFETY_ENGINE` (500), does **not** call Gemini.
 5. Otherwise assembles document context from ChromaDB and calls Gemini for generation.
 6. Returns answer with citations and safety metadata, `response_mode` = `"normal"`.
 
@@ -379,7 +422,8 @@ The user sends a message. The backend:
 | `answer` | string | Yes | Generated response text (safety refusal message if emergency) |
 | `citations` | list[Citation] | Yes | Retrieved source excerpts (empty if emergency) |
 | `safety` | SafetyResult | Yes | Safety engine output |
-| `context_used` | boolean | Yes | Whether document context was used |
+| `context_used` | boolean | Yes | Whether **retrieved PDF document context** was used in generation |
+| `context_sources` | list[string] | Yes | List of source types actually supplied to Gemini (e.g., `"profile"`, `"medications"`, `"episodes"`, `"documents"`). Only sources that were actually included are listed. |
 | `missing_information` | list[string] | No | Information needed to answer more completely |
 | `disclaimer` | string | Yes | Fixed medical disclaimer text |
 | `response_mode` | string | Yes | `normal` \| `emergency` |
@@ -478,7 +522,7 @@ Developer 2 implements the safety engine in a root-level `safety/` package. Deve
 
 ### 7.1 assess_safety — Chat safety assessment
 
-**Module:** `safety.engine`  
+**Module:** `safety.engine`
 **Function:** `assess_safety`
 
 ```python
@@ -506,7 +550,7 @@ def assess_safety(
 
 ### 7.2 check_medication_entry — Medication safety validation
 
-**Module:** `safety.engine`  
+**Module:** `safety.engine`
 **Function:** `check_medication_entry`
 
 ```python
@@ -520,24 +564,30 @@ def check_medication_entry(
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `candidate_medication` | dict | The medication being added/updated (`MedicationCreate`/`MedicationUpdate` as dict) |
+| `candidate_medication` | dict | The medication being added/updated (`MedicationCreate`/`MedicationUpdate` as dict, or the merged record for updates) |
 | `health_profile` | dict \| None | Current profile (`ProfileRead` as dict) or `None` |
-| `existing_medications` | list[dict] | Current medications (`[MedicationRead ...]`) |
+| `existing_medications` | list[dict] | Current medications excluding the record being updated (`[MedicationRead ...]`) |
 
 **Returns:** a `MedicationSafetyResult`-compatible object/dict with fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `is_duplicate` | boolean | Yes | `true` if an exact duplicate or ingredient overlap is detected |
+| `is_duplicate` | boolean | Yes | `true` only for an **exact duplicate** medication record |
 | `duplicate_type` | string | No | One of: `exact`, `ingredient_overlap`, `none` |
-| `warnings` | list[SafetyWarning] | No | Structured warnings (e.g., allergy match, ingredient overlap) |
-| `matched_item` | string | No | The medication/item that triggered the match |
+| `warnings` | list[SafetyWarning] | No | Structured warnings (e.g., ingredient overlap, allergy match). Returned even when `is_duplicate` is `false`. |
+| `matched_item` | string | No | The medication/item that triggered the match or warning |
 | `checked_items` | list[string] | Yes | What was checked (e.g., `medications`, `allergies`) |
+
+**Behavior:**
+- `is_duplicate = true` only when `duplicate_type == "exact"`. In this case the backend rejects the medication with `409 ERR_CONFLICT`.
+- When `duplicate_type == "ingredient_overlap"`: `is_duplicate` is `false`. The backend saves the medication and returns the structured warnings to the frontend.
+- When `duplicate_type == "none"`: no warnings, save normally.
 
 ### Integration flow
 
-1. **`POST /medications` / `PUT /medications/{id}`:** Backend calls `check_medication_entry`. If `is_duplicate` is `true`, return `409 ERR_CONFLICT` with the duplicate type and warnings.
-2. **`POST /chat`:** Backend calls `assess_safety`. If `safety.emergency` is `true`, return emergency response (no Gemini). If safety engine fails/invalid, return `ERR_SAFETY_ENGINE` (no Gemini). Otherwise proceed to retrieval + Gemini.
+1. **`POST /medications`:** Backend calls `check_medication_entry(candidate, health_profile, all_existing_medications)`. If `is_duplicate` is `true` (exact), return `409 ERR_CONFLICT`. Otherwise save and return warnings if present.
+2. **`PUT /medications/{id}`:** Backend merges submitted fields with the existing record, excludes the current record from `existing_medications`, validates date constraints on the merged record, then calls `check_medication_entry`. If exact duplicate, return `409 ERR_CONFLICT`. Otherwise save merged record and return warnings if present.
+3. **`POST /chat`:** Backend calls `assess_safety`. If `safety.emergency` is `true`, return emergency response (no Gemini). If safety engine fails/invalid, return `ERR_SAFETY_ENGINE` (no Gemini). Otherwise proceed to retrieval + Gemini.
 
 ---
 
@@ -571,6 +621,7 @@ def check_medication_entry(
     "checked_items": ["medications", "allergies"]
   },
   "context_used": true,
+  "context_sources": ["profile", "medications", "documents"],
   "missing_information": [],
   "disclaimer": "This information is for educational purposes only and is not a substitute for professional medical advice, diagnosis, or treatment. Always consult a qualified healthcare provider.",
   "response_mode": "normal"
@@ -598,6 +649,7 @@ def check_medication_entry(
     "checked_items": ["symptoms"]
   },
   "context_used": false,
+  "context_sources": [],
   "missing_information": [],
   "disclaimer": "This information is for educational purposes only and is not a substitute for professional medical advice, diagnosis, or treatment. Always consult a qualified healthcare provider.",
   "response_mode": "emergency"
@@ -611,24 +663,32 @@ def check_medication_entry(
 | Endpoint | Frontend Use |
 |----------|--------------|
 | `GET /health` | On app load, verify backend is reachable before enabling UI. |
-| `GET /profile` | Load user profile into the Health Profile UI on startup. |
+| `GET /profile` | Load user profile into the Health Profile UI on startup. If `id` is null, treat as "no profile" and prompt the user to create one. |
 | `PUT /profile` | Save changes from the Health Profile UI. |
 | `GET /episodes` | Populate the Recovery Episode list UI. |
 | `POST /episodes` | Create a new episode from the Recovery Episode UI. |
 | `GET /episodes/{id}` | Open episode detail view. |
 | `PUT /episodes/{id}` | Edit episode details. |
-| `GET /medications` | Populate the Medication list UI. Show `generic_name`, `active_ingredients`, `strength`, `route`, `status`. |
-| `POST /medications` | Add a new medication; show conflict warning if backend returns 409 (exact duplicate or ingredient overlap). |
+| `GET /medications` | Populate the Medication list UI. Show `generic_name`, `active_ingredients`, `strength`, `route`, `status`, and any `medication_warnings`. |
+| `POST /medications` | Add a new medication. If backend returns 409, show exact-duplicate conflict and do not save. If 201 with `medication_warnings`, save and display the structured warnings to the user (ingredient overlap does not block saving). |
 | `GET /medications/{id}` | Open medication detail view. |
-| `PUT /medications/{id}` | Edit medication; show conflict warning if backend returns 409. |
+| `PUT /medications/{id}` | Edit medication. If backend returns 409, show exact-duplicate conflict. If 200 with `medication_warnings`, save and display warnings. |
 | `DELETE /medications/{id}` | Remove a medication. |
 | `GET /documents` | Show uploaded document list in Document Upload UI. |
-| `POST /documents/upload` | Upload PDF; show `page_count`, `chunk_count`, `status` after upload. Handle 413 (too large) and 415 (not PDF). |
-| `POST /chat` | Send user query (optional `episode_id`) to Copilot chat UI. Render `answer`, show `citations` as source references, surface `safety.warnings` as severity-coded banners, show `disclaimer`. If `response_mode` is `emergency`, display urgent guidance prominently and indicate Gemini was not used. |
+| `POST /documents/upload` | Upload PDF; show `page_count`, `chunk_count`, `status` after upload. Handle 413 (too large), 415 (not PDF), and 422 (valid PDF but page count/password violation). If `status` is `failed`, show retry/delete options. |
+| `POST /chat` | Send user query (optional `episode_id`) to Copilot chat UI. Render `answer`, show `citations` as source references, surface `safety.warnings` as severity-coded banners, show `disclaimer`. Use `context_used` and `context_sources` to show which sources informed the answer. If `response_mode` is `emergency`, display urgent guidance prominently and indicate Gemini was not used. |
 
 ---
 
-## 10. Medical Disclaimers (Required)
+## 10. Data Conventions
+
+### Timezone Handling
+
+All datetime fields use ISO-8601 format. Backend stores and returns datetimes in UTC. Clients should send timezone-aware datetimes where possible; naive datetimes are interpreted as local time by the backend and normalized to UTC on storage. Date-only fields (e.g., `start_date`, `end_date` on medications) use ISO-8601 date format (`YYYY-MM-DD`) with no time component.
+
+---
+
+## 11. Medical Disclaimers (Required)
 
 - This is a hackathon prototype, not a medical device.
 - No diagnosis, treatment recommendations, or prescriptions are provided.
@@ -639,5 +699,5 @@ def check_medication_entry(
 
 ---
 
-**End of contract.**  
+**End of contract.**
 No backend endpoints or functionality are implemented by this document. Developer 1 implements the endpoints per this contract in Phase 2; Developer 2 implements `safety/` and the Streamlit frontend per this contract.

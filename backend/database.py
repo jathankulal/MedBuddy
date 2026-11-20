@@ -3,8 +3,16 @@
 import json
 import os
 import tempfile
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+
+
+def _json_default(o):
+    """JSON serializer for date/datetime objects."""
+    if isinstance(o, (date, datetime)):
+        return o.isoformat()
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
 
 
 def ensure_data_dir(data_dir: str = "./data") -> Path:
@@ -43,7 +51,7 @@ def write_json(data_dir: str, filename: str, data: Any) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp_", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, ensure_ascii=False)
+            json.dump(data, fh, indent=2, ensure_ascii=False, default=_json_default)
             fh.write("\n")
         os.replace(tmp_name, path)
     except Exception:

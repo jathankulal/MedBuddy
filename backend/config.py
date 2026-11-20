@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     data_dir: str = "./data"
-    cors_origins: str = "http://localhost:8501"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8501"
 
     # Gemini (backend only). Frontend communicates through API endpoints.
     gemini_api_key: str | None = None
