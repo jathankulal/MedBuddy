@@ -1,0 +1,39 @@
+# --- Data (local, excluded from Git) ---
+data/
+
+# --- Python ---
+__pycache__/
+*.py[cde]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# --- Environment (secrets are local only) ---
+.env
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Testing / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- ChromaDB ---
+*.chroma
+chroma/
+.chroma
+
+# --- Logs ---
+*.log
