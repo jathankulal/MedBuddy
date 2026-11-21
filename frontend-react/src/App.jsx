@@ -5,6 +5,7 @@ import HealthCopilot from './pages/HealthCopilot'
 import AuthPage from './pages/AuthPage'
 import CareEpisodes from './pages/CareEpisodes'
 import Documents from './pages/Documents'
+import MobileNav from './components/MobileNav';
 import { api } from './services/api'
 import {
   Activity, LayoutDashboard, UserRound, Pill, FileText,
@@ -230,7 +231,7 @@ function App() {
           </div>
         </header>
 
-        <div className="mx-auto max-w-[1440px] p-5 sm:p-8">
+        <div className="mx-auto max-w-[1440px] p-5 pb-28 sm:p-8">
           {active === 'Health Copilot' ? (
             <HealthCopilot />
           ) : active === 'Documents' ? (
@@ -252,7 +253,7 @@ function App() {
                     Welcome to MedBuddy 🌿
                   </h2>
                   <p className="max-w-md text-sm leading-6 text-[#71877a]">
-                    Keep your health profile, medications, care episodes, and documents organized in persistent storage with RAG-grounded AI support.
+                    Keep your medicines, health details and medical reports together in one simple place.
                   </p>
                   <button
                     onClick={() => selectPage('Health Profile')}
@@ -440,7 +441,7 @@ function App() {
           ) : null}
 
           <footer className="mt-8 flex flex-col justify-between gap-2 border-t border-[#eaf0eb] pt-5 text-[11px] text-[#a2afa6] sm:flex-row">
-            <span>© 2026 MedBuddy · Your Personal Health Context Copilot</span>
+            <span>© 2026 MedBuddy · YOUR HEALTH COMPANION</span>
             <span className="flex items-center gap-1"><ShieldCheck size={13} /> Designed with care for your health information</span>
           </footer>
         </div>
@@ -462,8 +463,15 @@ function App() {
               <X size={14} />
             </button>
           </div>
+          
         )}
       </main>
+      <div className="md:hidden">
+  <MobileNav
+    active={active}
+    onNavigate={setActive}
+  />
+</div>
     </div>
   )
 }
